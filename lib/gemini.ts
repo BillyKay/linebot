@@ -1,56 +1,36 @@
 import { GoogleGenAI } from "@google/genai";
+import { buildSystemPrompt } from "@/lib/prompts";
+import { log } from "@/lib/log";
 
-const DEFAULT_REPLY =
+const MODEL = "gemini-2.5-flash";
+
+export const DEFAULT_REPLY =
   "ขอโทษนะคะ เรื่องนี้ป้าตอบไม่ได้เลยค่ะ ลองโทรหาร้านโดยตรงได้เลยนะคะ 📞";
 
-const SYSTEM_PROMPT = `<role>
-คุณคือป้าเมย์ พนักงานตอบแชทของร้านอาหารตามสั่ง
-</role>
+const BOT_NAME = "ป้าเมย์";
+const BUSINESS_NAME = "ร้านอาหารตามสั่ง ป้าเมย์";
+const TONE = 'เป็นกันเอง อบอุ่น สนุกสนาน ลงท้ายด้วย "ค่ะ"';
 
-<constraints>
-- ตอบโดยใช้ข้อมูลใน <faq> เท่านั้น
-- ห้ามแต่งราคา เวลา ที่ตั้ง หรือเมนูที่ไม่มีใน FAQ ขึ้นมาเอง
-- ถ้าไม่มีข้อมูลตอบ ให้พูดว่า: "ขอโทษนะคะ เรื่องนี้ป้าตอบไม่ได้เลยค่ะ ลองโทรหาร้านโดยตรงได้เลยนะคะ 📞"
-- โทน: เป็นกันเอง สั้น ได้ใจความ สนุกสนาน แทรก emoji เล็กน้อย
-- ความยาว: 1–3 ประโยค ห้ามยาวกว่านี้
-</constraints>
-
-<output_format>
-- ภาษาไทยเท่านั้น
-- ห้ามใช้ markdown (ไม่มี ** * #)
-- ห้ามขึ้นหัวข้อหรือใส่ bullet list
-</output_format>
-
-<faq>
-{{FAQ_CSV_CONTENT}}
-</faq>
-
-<question>
-{{USER_MESSAGE}}
-</question>`;
-
-export type GeminiResult = {
-  reply: string;
-  finishReason: string;
-  thoughtsTokenCount: number | undefined;
-  candidatesTokenCount: number | undefined;
-};
-
-export async function askGemini(
-  faqCsv: string,
-  userMessage: string
-): Promise<GeminiResult> {
+export async function generateReply(
+  userMessage: string,
+  faqText: string
+): Promise<string> {
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
+  const startTime = Date.now();
 
-  const prompt = SYSTEM_PROMPT.replace("{{FAQ_CSV_CONTENT}}", faqCsv).replace(
-    "{{USER_MESSAGE}}",
-    userMessage
+  const systemPrompt = buildSystemPrompt(
+    BOT_NAME,
+    BUSINESS_NAME,
+    faqText,
+    DEFAULT_REPLY,
+    TONE
   );
 
   const response = await ai.models.generateContent({
-    model: "gemini-2.5-flash",
-    contents: prompt,
+    model: MODEL,
+    contents: userMessage,
     config: {
+      systemInstruction: systemPrompt,
       temperature: 1.0,
       maxOutputTokens: 1024,
     },
@@ -58,15 +38,28 @@ export async function askGemini(
 
   const candidate = response.candidates?.[0];
   const finishReason = candidate?.finishReason ?? "UNKNOWN";
-  const thoughtsTokenCount = response.usageMetadata?.thoughtsTokenCount;
-  const candidatesTokenCount =
-    response.usageMetadata?.candidatesTokenCount;
+  const usage = response.usageMetadata;
 
-  console.log("[gemini]", { finishReason, thoughtsTokenCount, candidatesTokenCount });
+  log.info("gemini.reply", {
+    latencyMs: Date.now() - startTime,
+    inputLength: userMessage.length,
+    outputLength: response.text?.length ?? 0,
+    finishReason,
+    thoughtsTokenCount: usage?.thoughtsTokenCount ?? 0,
+    candidatesTokenCount: usage?.candidatesTokenCount ?? 0,
+    totalTokenCount: usage?.totalTokenCount ?? 0,
+  });
 
-  const text = response.text ?? DEFAULT_REPLY;
+  if (finishReason === "MAX_TOKENS") {
+    log.warn("gemini.max_tokens", {
+      thoughtsTokenCount: usage?.thoughtsTokenCount,
+      candidatesTokenCount: usage?.candidatesTokenCount,
+    });
+    return DEFAULT_REPLY;
+  }
 
-  return { reply: text, finishReason, thoughtsTokenCount, candidatesTokenCount };
+  const reply = response.text?.trim();
+  if (!reply) throw new Error("gemini_empty_response");
+
+  return reply;
 }
-
-export { DEFAULT_REPLY };
